@@ -155,7 +155,7 @@ static const UINT32 PC_SAMPLING_SIZE = 8;
 // WC cache parameters: total size = 128kB
 //xinw modified the WCCACHE size to 32KB-begin
 //static const INT32 WCCACHE_SET_NUM = 128;
-static const INT32 WCCACHE_SET_NUM = 1;
+static const INT32 WCCACHE_SET_NUM = 16;
 //static const INT32 WCCACHE_SET_NUM = 4;
 //static const INT32 WCCACHE_SET_NUM = 2;
 //xinw modified the WCCACHE size to 32KB-end
@@ -656,15 +656,17 @@ double DCCM_OVERHEAD_RATIO_AFTER_WARMUP=0.05;
 int64_t dccm_overflow_traffic=0;
 int64_t dccm_remain_budget=0;
 bool is_dccm_overhead=false;
-#define TABLE_SIZE 64
+#define TABLE_SIZE 8
 //UINT32 TABLE_SIZE= 16;
 //once modified in march_3_otp32_epoch1million
-#define TABLE_LINE_SIZE 2
+#define TABLE_LINE_SIZE 16
 //#define TABLE_LINE_SIZE 1
 //#define AES_OTP_INTERVAL 5000
-#define AES_OTP_INTERVAL 1024
+//#define AES_OTP_INTERVAL 1024
+#define AES_OTP_INTERVAL 102400
 //#define OTP_INTERVAL 5000
-#define OTP_INTERVAL 1024
+//#define OTP_INTERVAL 1024
+#define OTP_INTERVAL 102400
 #define OTP_ACTIVE_RELEVEL_SMALL_GROUP_NUMBER 2
 #define OTP_ACTIVE_RELEVEL_BIG_GROUP_NUMBER (TABLE_SIZE-2)
 UINT64 history_max_wc=0;
@@ -1284,7 +1286,8 @@ MorphCtrBlock::MorphCtrBlock() {
 
 void MorphCtrBlock::InitBlock(bool is_random, uint32_t expected_level, uint32_t _node_index){
 	//if(_node_index%2==0)
-	zcc_major_ctr_  = 0;
+	//zcc_major_ctr_  = 0;
+	zcc_major_ctr_  = 128;
 	zcc_nzctrs_type_ = ZCC_16BIT_CTR;
 	zcc_nzctrs_num_ = 0;
 	zcc_max_minor_ctr_ = 0;
@@ -2770,9 +2773,9 @@ void MorphTree::InitTree(bool is_random)
   tree_level3.InitBlock(is_random,3,0);
   if(OTP_PRECALCULATION)
   {
-	//history_max_wc=127;
+	history_max_wc=127;
 	//history_max_wc=256;
-	history_max_wc=202;
+	//history_max_wc=202;
 	last_history_max_wc=history_max_wc;
 	UINT64 _min_wc=0;
 	otp_table.reset(history_max_wc, _min_wc);
