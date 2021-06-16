@@ -47,6 +47,7 @@
 #include <bitset>
 #include <ctime>
 #include <cstdlib>
+#define debug_page_zero 0
 #define debug_aes_hit 0
 #define debug_dccm_counter 0
 #define debug_budget 0
@@ -55,6 +56,7 @@
 #define custom_debug 0
 #define custom_debug_wc_insertion 0
 UINT64 index_of_billion=1;
+UINT64 current_block_addr_access_aes_table=0;
 //2482820973259164488
 //xinw added
 
@@ -97,9 +99,11 @@ char output_buff[4];
 using namespace std;
 int CACHELINE_OFFSET=0;
 //#define OTP_PRECALCULATION 0
+int delay_high_level_tree_node_overflow=0;
 int dccm_block_level_relevel=0;
 int huge_page=0;
 int is_gap=0;
+int use_page_zero=0;
 int OTP_PRECALCULATION=0;
 int BEGIN_WITH_BIG_COUNTER=0;
 int flag_variable_detected=0;
@@ -484,6 +488,8 @@ KNOB<int> KnobHugePage(KNOB_MODE_WRITEONCE, "pintool",
   "huge_page", "0", "option to turn/off huge page");
 KNOB<int> KnobIsGap(KNOB_MODE_WRITEONCE, "pintool",
   "is_gap", "0", "identify whether it is running for GAP or microbenchmarks");
+KNOB<int> KnobUsePageZero(KNOB_MODE_WRITEONCE, "pintool",
+  "use_page_zero", "0", "identify whether it is using page zeroing");
 KNOB<int> KnobPredictiveDecryption(KNOB_MODE_WRITEONCE, "pintool",
   "predictive_decryption", "0", "option to turn/off dccm");
 KNOB<double> KnobDccmOverhead(KNOB_MODE_WRITEONCE, "pintool",
@@ -494,6 +500,8 @@ KNOB<double> KnobSkipGapInit(KNOB_MODE_WRITEONCE, "pintool",
   "skip_gap_init", "480000000", "specify gap fast forward value");
 KNOB<double> KnobPossibilityOverflowRelevel(KNOB_MODE_WRITEONCE, "pintool",
   "possibility_overflow_relevel", "1", "specify possibility of dccm releveling with overflow overhead");
+KNOB<int> KnobDelayHighLevelTreeNodeOverflow(KNOB_MODE_WRITEONCE, "pintool",
+  "delay_high_level_tree_node_overflow", "0", "option to turn/off delay_high_level_tree_node_overflow");
 // Fast randomization algorithm (used instead of rand()). Used in DIP/DRRIP for probability of long vs distant insertion 
 UINT32 xor5rand() {
   static UINT32 a = 123456789;
@@ -662,10 +670,8 @@ bool is_dccm_overhead=false;
 #define TABLE_LINE_SIZE 16
 //#define TABLE_LINE_SIZE 1
 //#define AES_OTP_INTERVAL 5000
-//#define AES_OTP_INTERVAL 1024
 #define AES_OTP_INTERVAL 102400
 //#define OTP_INTERVAL 5000
-//#define OTP_INTERVAL 1024
 #define OTP_INTERVAL 102400
 #define OTP_ACTIVE_RELEVEL_SMALL_GROUP_NUMBER 2
 #define OTP_ACTIVE_RELEVEL_BIG_GROUP_NUMBER (TABLE_SIZE-2)
@@ -743,6 +749,7 @@ public:
   void reset(UINT64 _max_ctr, UINT64 _min_ctr);
   bool CheckTable(UINT64 _max_ctr, UINT64 _min_ctr);
   void PrintOtpTable();
+  
   void update();
   bool need_activel_relevel(UINT64 _effective_ctr);
   UINT64 get_relevel_wc(UINT64 _effective_ctr, bool default_clean, bool default_overflow);
@@ -790,18 +797,23 @@ bool OtpTable::CheckTable(UINT64 _max_ctr, UINT64 _min_wc)
   }
 
 void OtpTable::PrintOtpTable() {
+/*
   std::ostringstream oss_otp;
   oss_otp << KnobOutputFile.Value().c_str() << "_morphtree_baseline_august_26_verify_otp8_baseline_page_zero_without_insert_otp_table.out";
   std::string out_file_name = oss_otp.str();
-  //output_file.open(out_file_name.c_str());
-  //xinw modified open to append
   output_file_otp.open(out_file_name.c_str(), ios::out|ios::app);
   output_file_otp<< "otp table at memory instruction " <<memory_instruction_count_total<<": ";
   for(int table_index=0; table_index<TABLE_SIZE; table_index++)
         output_file_otp<<table[table_index]<<" ";
   output_file_otp << std::endl << std::endl; 
   output_file_otp.close();
-  output_file_otp.clear();
+  output_file_otp.clear(); 
+*/
+printf("update the AES table: \n");
+ for(int table_index=0; table_index<TABLE_SIZE; table_index++)
+        cout<<table[table_index]<<" ";
+ printf(" at instruction: %lu after memory accesses:%lu\n", instruction_count_total-fast_forward_value, memory_fetches_stats);
+ 
 }
   void OtpTable::update()
   {
@@ -827,6 +839,7 @@ void OtpTable::PrintOtpTable() {
       if (warmup_status == WARMUP_OVER)
 	otp_table_update_stats++;
 	//once modified in march_3_otp32_epoch1million
+
       table[0]=history_max_wc;
       assert((table[0]>max_wc)); 
       history_max_wc+=TABLE_LINE_SIZE-1;
@@ -1077,9 +1090,9 @@ UINT64 OtpTable::get_nearest_bottom_wc(UINT64 _effective_ctr)
     if(debug_aes_hit)
     {
       if(is_hit)
-	printf("AES table hit for effective counter: %lu, instruction number: %lu\n", _effective_ctr, instruction_count_total-fast_forward_value );
+	printf("AES table hit for effective counter: %lu, data block addr:  %lu, instruction number: %lu\n", _effective_ctr, current_block_addr_access_aes_table, instruction_count_total-fast_forward_value );
       else
-	printf("AES table miss for effective counter: %lu, instruction number: %lu\n", _effective_ctr, instruction_count_total-fast_forward_value );
+	printf("AES table miss for effective counter: %lu, data block addr:  %lu, instruction number: %lu\n", _effective_ctr, current_block_addr_access_aes_table, instruction_count_total-fast_forward_value );
     }
      return is_hit;	
   }
@@ -1287,6 +1300,7 @@ MorphCtrBlock::MorphCtrBlock() {
 void MorphCtrBlock::InitBlock(bool is_random, uint32_t expected_level, uint32_t _node_index){
 	//if(_node_index%2==0)
 	//zcc_major_ctr_  = 0;
+
 	zcc_major_ctr_  = 128;
 	zcc_nzctrs_type_ = ZCC_16BIT_CTR;
 	zcc_nzctrs_num_ = 0;
@@ -1295,7 +1309,6 @@ void MorphCtrBlock::InitBlock(bool is_random, uint32_t expected_level, uint32_t 
 	ctr_is_used_ = 0;
 	ctr_level_ = expected_level;
 
-	//mcr_major_ctr_ = 1;
 	mcr_major_ctr_ = 0;
 	mcr_base_1_ = 0;
 	mcr_base_2_ = 0; 
@@ -1638,6 +1651,7 @@ void MorphCtrBlock::SwitchFormatZccToMcr() {
 	}
 	else
 	{
+		//printf("switching from zcc to mcr without overflow\n");
 		mcr_major_ctr_ = zcc_major_ctr_ >> MCR_MAJOR_CTR_SHIFT;
 		mcr_base_1_ = zcc_major_ctr_ & MCR_BASE_MASK;
 		mcr_base_2_ = zcc_major_ctr_ & MCR_BASE_MASK;
@@ -1748,8 +1762,28 @@ void MorphCtrBlock::IncrementMinorCounter(const UINT64& pos, bool default_clean,
   ctr_is_used_ = 1;
   ////std::cout << "ctrformat " << ctr_format_ << std::endl;
   if (ctr_format_ == ZCC_FORMAT) {
-    IncrementZccMinorCounter(pos, default_clean, should_relevel);
+  /*  if((ctr_level_==0)&&(instruction_count_total>680737500))	 
+      {
+	 printf("place 1, for minor counter index: %lu\n", pos);
+	printf("the effective counters: ");
+        for(UINT64 index=0;index<128;index++)
+   	 printf("index: %lu, value: %lu ", index, GetEffectiveCounter(0, index));
+	printf("\n");
+	}
+*/	
+	 IncrementZccMinorCounter(pos, default_clean, should_relevel);
+  /*  if((ctr_level_==0)&&(instruction_count_total>680737500))	 
+      {
+	 printf("after place 1, for minor counter index: %lu\n", pos);
+	printf("the effective counters: ");
+        for(UINT64 index=0;index<128;index++)
+   	 printf("index: %lu, value: %lu ", index, GetEffectiveCounter(0, index));
+	printf("\n");
+	}
+*/	
   } else if (ctr_format_ == MCR_FORMAT) {
+    //if((ctr_level_==0)&&(instruction_count_total>680737500))	 
+    //	printf("place 2\n");
     IncrementMcrMinorCounter(pos, default_clean, should_relevel);
   }
 }
@@ -2012,44 +2046,51 @@ void MorphCtrBlock::IncrementZccMinorCounter(const UINT64& pos, bool default_cle
 	}
 	zcc_frequency_stats[ctr_level_][zcc_nzctrs_type_]++;
 	if (minor_ctrs_[pos] == 0) {
-		zcc_nzctrs_num_ += 1; 
-		//xinw added-begin
-		//if(ctr_level_==2)
-		//printf("zcc nonzero num: %d\n",zcc_nzctrs_num_);
-		//xinw added-end
+                //xinw: fix switch from zcc to mcr
+		zcc_nzctrs_num_ += 1;
+		if(OTP_PRECALCULATION&&ctr_level_==0&&!is_stack&&should_relevel)
+		{
+			minor_ctrs_[pos]+=1;
+			bool default_overflow=ZccCheckForOverflows(minor_ctrs_[pos]);
+			minor_ctrs_[pos]-=1;
+
+			minor_ctrs_[pos]=GetMinorCounter(otp_table.get_relevel_wc(GetEffectiveCounter(ctr_level_, pos), default_clean, default_overflow), pos); 
+		}
+		else
+			minor_ctrs_[pos] = 1; 
+		if (minor_ctrs_[pos] > zcc_max_minor_ctr_) {
+					zcc_max_minor_ctr_ = minor_ctrs_[pos];
+				}
+
 		if (zcc_nzctrs_num_ > ZCC_NZCTRS_NUM[zcc_nzctrs_type_]) {
 			if (zcc_nzctrs_type_ == ZCC_4BIT_CTR) { 
-				//std::cout << "izmc2y1" << std::endl;
 				current_pos=pos;
 				SwitchFormatZccToMcr(); 
 				if(OTP_PRECALCULATION&&default_clean&&ctr_level_==0&&!is_stack)
 				{
 					overflow_due_to_releveling_total++; 
 					if (warmup_status == WARMUP_OVER) {
-					     overflow_due_to_releveling_stats++; 
-    					}
+						overflow_due_to_releveling_stats++; 
+					}
 				}			
 			} else { 
-				//std::cout << "izmc2y2" << std::endl;
-				//xinw added for otp precomputation-begin
-				if(OTP_PRECALCULATION&&ctr_level_==0&&!is_stack&&should_relevel)
+			/*	if(OTP_PRECALCULATION&&ctr_level_==0&&!is_stack&&should_relevel)
 				{
 					minor_ctrs_[pos]+=1;
 					bool default_overflow=ZccCheckForOverflows(minor_ctrs_[pos]);
 					minor_ctrs_[pos]-=1;
-					
+
 					minor_ctrs_[pos]=GetMinorCounter(otp_table.get_relevel_wc(GetEffectiveCounter(ctr_level_, pos), default_clean, default_overflow), pos); 
 				}
-                          	else
+				else
 					minor_ctrs_[pos] = 1; 
-				//xinw added for otp precomputation-end
 				if (minor_ctrs_[pos] > zcc_max_minor_ctr_) {
 					zcc_max_minor_ctr_ = minor_ctrs_[pos];
 				}
+			*/
 				zcc_nzctrs_type_ += 1; 
 				zcc_inner_switches_stats[ctr_level_][zcc_nzctrs_type_]++;
 				if (ZccCheckForOverflows(0)) {
-					//std::cout << "izmc2y3" << std::endl;
 					MinorCountersReset(0);
 				}
 			}      
@@ -2629,6 +2670,7 @@ void MorphCtrBlock::FetchForOverflow()
 
 // MorpTree + Encryption Level
 
+static const UINT64 TWOM_PAGE_ADDR_FLOOR_MASK =  0xFFFFFFFFFFE00000; 
 static const UINT64 FOURK_PAGE_ADDR_FLOOR_MASK = 0xFFFFFFFFFFFFF000; 
 static const UINT64 EIGHTK_PAGE_ADDR_FLOOR_MASK = 0xFFFFFFFFFFFFE000; 
 
@@ -2684,12 +2726,13 @@ class MorphTree {
     MorphCtrBlock tree_level3;
     //std::unordered_map<UINT64, MorphCtrBlock> versions_level;
 
-    std::unordered_map<UINT64, UINT64> virtual_to_physical_page_map;
+    //std::unordered_map<UINT64, UINT64> virtual_to_physical_page_map;
     UINT64 rand_pages_map[PHYSICAL_PAGES_NUM]; 
 
     UINT64 last_physical_page_addr;
    //xinw added for debugging
     UINT64 last_physical_page_addr_debug;
+    std::unordered_map<UINT64, UINT64> virtual_to_physical_page_map;
 };
   
 
@@ -2868,18 +2911,19 @@ UINT64 MorphTree::GetPhysicalPageAddress(const UINT64& block_addr) {
 
 }
 bool MorphTree::NeedPageZero(const UINT64& block_addr) {
+	if(!use_page_zero)
+		return false;
+	else
+	{
+		UINT64 virtual_page_addr = block_addr & FOURK_PAGE_ADDR_FLOOR_MASK;
 
-return false;
-/*
-  UINT64 virtual_page_addr = block_addr & FOURK_PAGE_ADDR_FLOOR_MASK;
+		if (virtual_to_physical_page_map.find(virtual_page_addr) != virtual_to_physical_page_map.end()) {
+			return false; 
 
-  if (virtual_to_physical_page_map.find(virtual_page_addr) != virtual_to_physical_page_map.end()) {
-    return false; 
-
-  } else {
-    return true;
-  }
- */
+		} else {
+			return true;
+		}
+	}
 }
 
 
@@ -3143,10 +3187,11 @@ typedef struct WcCacheBlock {
   //xinw added for more detailed metadata traffic statistics-begin
   bool wc_dirty;
   int rrpv;
+  UINT64 overflow_overhead;
   //xinw added for more detailed metadata traffic statistics-end
   //xinw modified for more detailed metadata traffic statistics-begin
   //WcCacheBlock() : wc_block_addr(0), recency_value(0), instruction_count(0) {}
-  WcCacheBlock() : wc_block_addr(0), recency_value(0), instruction_count(0), wc_dirty(false),rrpv(3) {}
+  WcCacheBlock() : wc_block_addr(0), recency_value(0), instruction_count(0), wc_dirty(false),rrpv(3),overflow_overhead(0) {}
   //xinw modified for more detailed metadata traffic statistics-end
 } WC_CACHE_BLOCK;
 
@@ -3175,6 +3220,7 @@ class WriteCountCache {
     void PreemptiveVerification(const UINT64& wc_block_addr, const UINT64& instr_count); 
     UINT32 IsWcCacheHit(const UINT64& set, const UINT64& wc_block_addr, const UINT64& instr_count); 
     UINT32 CheckWcCacheHit(const UINT64& set, const UINT64& wc_block_addr, const UINT64& instr_count); 
+    void UpdateOverflowOverhead( const UINT64& set, const UINT64& wc_block_addr, UINT64 _overflow_overhead);
     //void Insert(const bool& wccache_hit, const UINT64& set, const UINT64& wc_block_addr, const UINT64& instr_count); 
     //xinw modified
     void Insert(const bool& wccache_hit, const UINT64& set, const UINT64& wc_block_addr, const UINT64& instr_count, bool is_ditry, const UINT64& minor_index ); 
@@ -3182,6 +3228,7 @@ class WriteCountCache {
     //void ChainCounterIncrement(const UINT64& counter_id, const UINT64& wc_block_addr, const UINT64& minor_ctr_pos, const UINT64& instr_count); 
     //void ChainCounterIncrementForSmall(const UINT64& counter_id, const UINT64& wc_block_addr, const UINT64& minor_ctr_pos, const UINT64& instr_count, bool default_clean, bool should_relevel, UINT32 table_index); 
     void ChainCounterIncrement(const UINT64& counter_id, const UINT64& wc_block_addr, const UINT64& minor_ctr_pos, const UINT64& instr_count, bool default_clean, bool should_relevel, UINT32 table_index); 
+    //void WriteBack(const UINT64& evict_addr);
     UINT32 will_overflow(const UINT64& counter_id, const UINT64& wc_block_addr, const UINT64& minor_ctr_pos, const UINT64& instr_count, bool default_clean, bool is_relevel);
     UINT32 highest_group_to_avoid_overflow(const UINT64& counter_id, const UINT64& wc_block_addr, const UINT64& minor_ctr_pos, bool default_clean, bool is_relevel);
 	private:
@@ -3305,6 +3352,25 @@ UINT32 WriteCountCache::IsWcCacheHit(const UINT64& set, const UINT64& wc_block_a
   return is_wccache_hit;
 }
  
+void   WriteCountCache::UpdateOverflowOverhead( const UINT64& set, const UINT64& wc_block_addr, UINT64 _overflow_overhead){
+   //std::cout << "iwcb0 " << set << " " << wc_block_addr << std::endl;
+  //INT64 largest_recency_value = -1;
+  INT32 usage_index = wc_set_usage_[set];
+  for (INT32 i = 0; i <= usage_index; ++i) {
+    /*
+    if(wc_cache_[set][i].recency_value > largest_recency_value) {
+      largest_recency_value = wc_cache_[set][i].recency_value;
+      victim_index = i;
+    }
+    */
+    if(wc_cache_[set][i].wc_block_addr == wc_block_addr) {
+      if(_overflow_overhead>wc_cache_[set][i].overflow_overhead)
+	wc_cache_[set][i].overflow_overhead=_overflow_overhead;
+      return;
+    }
+  } 
+
+}
 //void WriteCountCache::Insert(const bool& wccache_hit, const UINT64& set, const UINT64& wc_block_addr, const UINT64& instr_count) {
 void WriteCountCache::Insert(const bool& wccache_hit, const UINT64& set, const UINT64& wc_block_addr, const UINT64& instr_count, bool is_dirty, const UINT64& minor_index) {
  
@@ -3423,6 +3489,7 @@ UINT64 WriteCountCache::InsertWcCacheBlock(const UINT64& set, const UINT64& wc_b
       wc_cache_[set][usage_index].instruction_count = new_count; 
       //xinw added-begin
       wc_cache_[set][usage_index].wc_dirty = is_dirty; 
+      wc_cache_[set][usage_index].overflow_overhead = 0; 
       //xinw added-end
       if(custom_debug_wc_insertion)
 	printf("the inserted wc block index in set is : %d\n", usage_index);
@@ -3439,8 +3506,15 @@ UINT64 WriteCountCache::InsertWcCacheBlock(const UINT64& set, const UINT64& wc_b
       {
         evicted_wccache_block_addr = wc_cache_[set][victim_index].wc_block_addr;
 	wc_cache_write_total++;
+        
         if (warmup_status == WARMUP_OVER) {
 		wc_cache_write_stats++;
+    		UINT32 _curr_tree_level = morph_tree.GetCurrentLevel(evicted_wccache_block_addr); 
+		if((_curr_tree_level>0)&&delay_high_level_tree_node_overflow)
+		{
+			    overflow_fetches_stats+=wc_cache_[set][victim_index].overflow_overhead;
+			    overflow_fetches_stats_level[_curr_tree_level]+=wc_cache_[set][victim_index].overflow_overhead;
+		}
 	}
       }    
       wc_cache_[set][victim_index].wc_block_addr = wc_block_addr; 
@@ -3449,6 +3523,7 @@ UINT64 WriteCountCache::InsertWcCacheBlock(const UINT64& set, const UINT64& wc_b
       wc_cache_[set][victim_index].rrpv = 2; 
       wc_cache_[set][victim_index].instruction_count = new_count;  
       wc_cache_[set][victim_index].wc_dirty = is_dirty; 
+      wc_cache_[set][victim_index].overflow_overhead = 0; 
       //xinw added-end
 
     }
@@ -4835,7 +4910,10 @@ VOID PrintAfterWarmupStats() {
   output_file <<  "OTP_TABLE_Passive_Relevel: "<< otp_table_passive_relevel_stats<<std::endl; 
   output_file <<  "OTP_TABLE_Hits_While_Wc_Cache_Misses: "<< otp_table_hit_while_wc_cache_miss_stats<<std::endl;
   output_file <<  "OTP_TABLE_Misses_While_Wc_Cache_Misses: "<< otp_table_miss_while_wc_cache_miss_stats<<std::endl;
-  
+  output_file <<  "content of the AES table: " <<std::endl;
+  for(int table_index=0; table_index<TABLE_SIZE; table_index++)
+        output_file << otp_table.table[table_index]<< std::endl;
+
   //xinw added-end
 
  
@@ -5042,6 +5120,88 @@ void update_workload_stats(const UINT64& block_addr)
 	}
 } 	
 UINT64 read_and_write_number=0;
+void WriteBack(const UINT64& L2_evict_addr, const UINT64& instruction_count)
+{
+	UINT64 temp_effective_version_before_increment=0; 
+	UINT64 temp_effective_version_after_increment=0; 
+	
+	UINT32 evict_is_wccache_hit = 0;
+	UINT64 evict_physical_page_addr = morph_tree.GetPhysicalPageAddress(L2_evict_addr);
+	UINT64 evict_wc_block_addr = morph_tree.GetCounterAddress(0, evict_physical_page_addr);
+	UINT64 evict_wccache_set = evict_wc_block_addr & WCCACHE_SET_MASK; 
+	UINT64 evict_minor_ctr_pos = (evict_physical_page_addr%2)*64+((L2_evict_addr >> DATA_CACHE_BLOCK_BITS) & (MINOR_CTR_POS_MASK>>1));
+	UINT64 evict_counter_id = morph_tree.GetLevelCounterId(0, evict_wc_block_addr);
+	UINT64 old_dccm_remain_budget = dccm_remain_budget;
+	read_and_write_number++;
+	if(read_and_write_number>=OTP_INTERVAL)
+	{
+		//  if(dccm_overflow_traffic<(DCCM_OVERHEAD_RATIO*OTP_INTERVAL+dccm_remain_budget))
+		dccm_remain_budget=DCCM_OVERHEAD_RATIO*OTP_INTERVAL+dccm_remain_budget-dccm_overflow_traffic;
+		if(debug_budget)
+			printf("in the end of epoch, the remaining budget is %ld, dccm_overflow_traffic in this epoch: %ld\n", dccm_remain_budget, dccm_overflow_traffic);
+		// else 
+		//dccm_remain_budget=0;
+		if(custom_debug)
+			printf("in the end of epoch, the remaining budget is %lu, dccm_overflow_traffic in this epoch: %lu, budget in the beginning of epoch: %lu\n", dccm_remain_budget, dccm_overflow_traffic, old_dccm_remain_budget);
+		accumulated_dccm_traffic_overhead+=dccm_overflow_traffic;     
+		read_and_write_number=0;
+		dccm_overflow_traffic=0;
+	}
+
+	evict_is_wccache_hit = wc_lru_cache.IsWcCacheHit(evict_wccache_set, evict_wc_block_addr, instruction_count); 
+	wc_cache_tree_access_stats[0]++;
+	wc_cache_tree_access_write_stats[0]++;
+	if(debug_metadata_cache){
+		printf("tree node level: 0 , wc block address: %lu , hit/miss(0 means miss): %u, due to normal data write\n ",   evict_wc_block_addr, evict_is_wccache_hit);
+	}
+	wc_lru_cache.Insert(evict_is_wccache_hit, evict_wccache_set, evict_wc_block_addr, instruction_count, true, evict_minor_ctr_pos);
+	is_dccm_overhead=false;
+	temp_effective_version_before_increment = morph_tree.GetEffectiveCounter(0, evict_counter_id, evict_minor_ctr_pos);
+	if(OTP_PRECALCULATION)
+	{
+		same_relevel_for_small_and_big=true;
+		if((morph_tree.versions_level[evict_counter_id].miss_small_ctr(evict_minor_ctr_pos, false))&&(wc_lru_cache.highest_group_to_avoid_overflow(evict_counter_id, evict_wc_block_addr, evict_minor_ctr_pos, false, true)<TABLE_SIZE))
+		{
+			UINT32 table_index=wc_lru_cache.highest_group_to_avoid_overflow(evict_counter_id, evict_wc_block_addr, evict_minor_ctr_pos, false, true);
+			wc_lru_cache.ChainCounterIncrement(evict_counter_id, evict_wc_block_addr, evict_minor_ctr_pos, instruction_count, false, true, table_index);
+		}	
+		else if(wc_lru_cache.will_overflow(evict_counter_id, evict_wc_block_addr, evict_minor_ctr_pos, instruction_count, true, false)>=wc_lru_cache.will_overflow(evict_counter_id, evict_wc_block_addr, evict_minor_ctr_pos, instruction_count, true, true))
+		{	
+			
+			wc_lru_cache.ChainCounterIncrement(evict_counter_id, evict_wc_block_addr, evict_minor_ctr_pos, instruction_count, false,true,1000);
+		}
+		else if ((dccm_overflow_traffic<(DCCM_OVERHEAD_RATIO*OTP_INTERVAL+dccm_remain_budget))&&(possibilistic_page_level_dccm_relevel()))
+		{
+			
+			potential_overflow_events++;
+			if(debug_budget)
+				printf("remaining budget: %lf,  before page level relevel,  instruction number: %lu, data block address: %lu\n", DCCM_OVERHEAD_RATIO*OTP_INTERVAL+dccm_remain_budget-dccm_overflow_traffic,  instruction_count_total,  current_written_block_address);
+			is_dccm_overhead=true;
+			before_dccm_overflow_events=total_overflow_events;
+			wc_lru_cache.ChainCounterIncrement(evict_counter_id, evict_wc_block_addr, evict_minor_ctr_pos, instruction_count, false,true,1000);
+			after_dccm_overflow_events=total_overflow_events;
+			if(after_dccm_overflow_events>before_dccm_overflow_events)
+				total_dccm_overflow_events++;
+		}  
+		else
+		{	
+			
+			wc_lru_cache.ChainCounterIncrement(evict_counter_id, evict_wc_block_addr, evict_minor_ctr_pos, instruction_count, false,false,1000);
+		}
+	
+	}
+	else
+	{
+		wc_lru_cache.ChainCounterIncrement(evict_counter_id, evict_wc_block_addr, evict_minor_ctr_pos, instruction_count, false,false,1000);
+	}
+	temp_effective_version_after_increment = morph_tree.GetEffectiveCounter(0, evict_counter_id, evict_minor_ctr_pos);
+	if(temp_effective_version_after_increment==temp_effective_version_before_increment)
+	{
+		printf("the counter value does not change after incrementing for data block address: %lu at instruction %lu!\n", L2_evict_addr, instruction_count);
+		exit(0);
+	}
+}
+
 UINT32 CacheCall(const UINT32& instruction_operation, const UINT64& instruction_count, const UINT64& program_counter, const UINT64& block_addr, const UINT32& stack_status) {
 if(instruction_operation == WRITE_OP)
 	L1_write_accesses++;
@@ -5052,7 +5212,7 @@ else
 //	return 0;
 
    //xinw added-begin
- /*
+ 
  bool need_page_zero = morph_tree.NeedPageZero(block_addr);
   UINT64 debug_physical_page_addr = morph_tree.GetPhysicalPageAddress(block_addr);
  if(debug_physical_page_addr==20000000) 
@@ -5061,52 +5221,40 @@ else
   if(need_page_zero)
   {
 	
+	//UINT64 page_begin_addr=block_addr&FOURK_PAGE_ADDR_FLOOR_MASK;
 	UINT64 page_begin_addr=block_addr&FOURK_PAGE_ADDR_FLOOR_MASK;
-	for(UINT64 i=0;i<64;i++)
-	{
+        if(huge_page)
+		page_begin_addr=block_addr&TWOM_PAGE_ADDR_FLOOR_MASK;
+	UINT64 num_of_blocks_each_page=64;
+        if(huge_page)
+		num_of_blocks_each_page=64*512;
+	for(UINT64 i=0;i<num_of_blocks_each_page;i++)
+	{	
 		memory_fetches_total++;
 		if (warmup_status == WARMUP_OVER) {
 			memory_fetches_stats++;
 		}
-		//CacheCall(WRITE_OP, instruction_count, program_counter, page_begin_addr+64*i, stack_status);
-		UINT64 wc_block_addr = morph_tree.GetCounterAddress(0, debug_physical_page_addr);
-		////std::cout << "wc_block_addr " <<  wc_block_addr << std::endl;
+		UINT64 wc_block_addr = morph_tree.GetCounterAddress(0, morph_tree.GetPhysicalPageAddress(page_begin_addr+i*64));
 		UINT64 wccache_set = wc_block_addr & WCCACHE_SET_MASK;
-		//std::cout << "1h " << physical_page_addr << " " << wc_block_addr << " " << wccache_set << std::endl;
 		UINT32 is_wccache_hit = wc_lru_cache.IsWcCacheHit(wccache_set, wc_block_addr, instruction_count); 
-		//std::cout << "is_wccache_hit " << is_wccache_hit << std::endl;
 		if (is_wccache_hit < 2) {
 			wc_lru_cache.PreemptiveVerification(wc_block_addr, instruction_count);
 		}
 		UINT64 data_addr = page_begin_addr+i*64;
 		UINT64 minor_ctr_pos = (data_addr >> DATA_CACHE_BLOCK_BITS) & MINOR_CTR_POS_MASK;
-  		wc_lru_cache.Insert(is_wccache_hit, wccache_set, wc_block_addr, instruction_count, false, minor_ctr_pos);
-	}	
-	for(UINT64 i=0;i<64;i++)
-	{	 
+		//if(debug_page_zero&&((i<100)||(i>(num_of_blocks_each_page-100))))
+		wc_lru_cache.Insert(is_wccache_hit, wccache_set, wc_block_addr, instruction_count, false, minor_ctr_pos);
 		memory_writebacks_total++; 
-		memory_writebacks_while_releveling_total++; 
 		if (warmup_status == WARMUP_OVER) {
 			memory_writebacks_stats++; 
 		}  
-		UINT32 evict_is_wccache_hit = 0;
 		UINT64 L2_evict_addr = page_begin_addr+i*64;
-		UINT64 evict_physical_page_addr = debug_physical_page_addr;
-		UINT64 evict_wc_block_addr = morph_tree.GetCounterAddress(0, evict_physical_page_addr);
-		UINT64 evict_wccache_set = evict_wc_block_addr & WCCACHE_SET_MASK; 
-		UINT64 evict_minor_ctr_pos = (L2_evict_addr >> DATA_CACHE_BLOCK_BITS) & MINOR_CTR_POS_MASK;
-		UINT64 evict_counter_id = morph_tree.GetLevelCounterId(0, evict_wc_block_addr);
-		evict_is_wccache_hit = wc_lru_cache.IsWcCacheHit(evict_wccache_set, evict_wc_block_addr, instruction_count); 
-		if (evict_is_wccache_hit < 2) {
-			wc_lru_cache.PreemptiveVerification(evict_wc_block_addr, instruction_count);
-		}
-		//wc_lru_cache.Insert(evict_is_wccache_hit, evict_wccache_set, evict_wc_block_addr, instruction_count);
-		wc_lru_cache.Insert(evict_is_wccache_hit, evict_wccache_set, evict_wc_block_addr, instruction_count, true, evict_minor_ctr_pos);
-		wc_lru_cache.ChainCounterIncrement(evict_counter_id, evict_wc_block_addr, evict_minor_ctr_pos, instruction_count, false,false, 1000);
+		WriteBack(L2_evict_addr, instruction_count);	
+		//if(debug_page_zero&&((i<100)||(i>(num_of_blocks_each_page-100))))
 	}  
 	
  } 
-*/
+
 //xinw added-end
 
   UINT64 current_PC = program_counter & PC_FLOOR_VAL_MASK;
@@ -5195,117 +5343,13 @@ else
             L2.InsertWithEviction(L2_evict_set, L1_evict_addr, L2_evict_index, L1_evict_dirty_status, 2);		
             EvictionUpdateStats(L2_evict_addr, L2_evict_index, L2_evict_dirty_status);
 
-            //std::cout << "2s" << std::endl;
-           
-            
-           
-            //xinw commented this part for otp precomputation-begin
-            /*
-            if (L2_evict_dirty_status == WRITE_OP) {
-              UINT32 evict_is_wccache_hit = 0;
-              UINT64 evict_physical_page_addr = morph_tree.GetPhysicalPageAddress(L2_evict_addr);
-              UINT64 evict_wc_block_addr = morph_tree.GetCounterAddress(0, evict_physical_page_addr);
-              UINT64 evict_wccache_set = evict_wc_block_addr & WCCACHE_SET_MASK;
-              evict_is_wccache_hit = wc_lru_cache.IsWcCacheHit(evict_wccache_set, evict_wc_block_addr, instruction_count); 
-              if (evict_is_wccache_hit < 2) {
-                wc_lru_cache.PreemptiveVerification(evict_wc_block_addr, instruction_count);
-
-              }
-              UINT64 evict_counter_id = morph_tree.GetLevelCounterId(0, evict_wc_block_addr);
-              UINT64 evict_minor_ctr_pos = (L2_evict_addr >> DATA_CACHE_BLOCK_BITS) & MINOR_CTR_POS_MASK;
-              wc_lru_cache.Insert(evict_is_wccache_hit, evict_wccache_set, evict_wc_block_addr, instruction_count);
-              wc_lru_cache.ChainCounterIncrement(evict_counter_id, evict_wc_block_addr, evict_minor_ctr_pos, instruction_count);
-              //UINT64 evict_effective_version = wc_lru_cache.GetEffectiveCounter(evict_wccache_set, evict_wc_block_addr, minor_ctr_pos);
-              ////std::cout << "evicteffectivecounter " << evict_effective_version << std::endl;
-              //std::cout << "2e" << std::endl;
-            }*/
-            //xinw commented this part for otp precomputation-end
-            //xinw added for otp precomputation-begin
-		
-	    	    UINT32 evict_is_wccache_hit = 0;
-              UINT64 evict_physical_page_addr = morph_tree.GetPhysicalPageAddress(L2_evict_addr);
-              UINT64 evict_wc_block_addr = morph_tree.GetCounterAddress(0, evict_physical_page_addr);
-              UINT64 evict_wccache_set = evict_wc_block_addr & WCCACHE_SET_MASK; 
-              //UINT64 evict_minor_ctr_pos = (L2_evict_addr >> DATA_CACHE_BLOCK_BITS) & MINOR_CTR_POS_MASK;
-              UINT64 evict_minor_ctr_pos = (evict_physical_page_addr%2)*64+((L2_evict_addr >> DATA_CACHE_BLOCK_BITS) & (MINOR_CTR_POS_MASK>>1));
-              UINT64 evict_counter_id = morph_tree.GetLevelCounterId(0, evict_wc_block_addr);
-              if (L2_evict_dirty_status == WRITE_OP) {
-		      UINT64 old_dccm_remain_budget = dccm_remain_budget;
-		      read_and_write_number++;
-		      if(read_and_write_number>=OTP_INTERVAL)
-		      {
-			     //  if(dccm_overflow_traffic<(DCCM_OVERHEAD_RATIO*OTP_INTERVAL+dccm_remain_budget))
-					dccm_remain_budget=DCCM_OVERHEAD_RATIO*OTP_INTERVAL+dccm_remain_budget-dccm_overflow_traffic;
-					if(debug_budget)
-					   printf("in the end of epoch, the remaining budget is %ld, dccm_overflow_traffic in this epoch: %ld\n", dccm_remain_budget, dccm_overflow_traffic);
-			     // else 
-					//dccm_remain_budget=0;
-				if(custom_debug)
-					printf("in the end of epoch, the remaining budget is %lu, dccm_overflow_traffic in this epoch: %lu, budget in the beginning of epoch: %lu\n", dccm_remain_budget, dccm_overflow_traffic, old_dccm_remain_budget);
-			      accumulated_dccm_traffic_overhead+=dccm_overflow_traffic;     
-			      read_and_write_number=0;
-			      dccm_overflow_traffic=0;
-		      }
-
-              evict_is_wccache_hit = wc_lru_cache.IsWcCacheHit(evict_wccache_set, evict_wc_block_addr, instruction_count); 
-    	      wc_cache_tree_access_stats[0]++;
-    	      wc_cache_tree_access_write_stats[0]++;
- //xinw added for metadata cache debugging
-    if(debug_metadata_cache){
-  	printf("tree node level: 0 , wc block address: %lu , hit/miss(0 means miss): %u, due to normal data write\n ",   evict_wc_block_addr, evict_is_wccache_hit);
-  }
-
-
-//xinw commentted for debugging with same stats as gem5
-/*              if (evict_is_wccache_hit < 2) {
-                wc_lru_cache.PreemptiveVerification(evict_wc_block_addr, instruction_count);
-              }
-*/
-              //wc_lru_cache.Insert(evict_is_wccache_hit, evict_wccache_set, evict_wc_block_addr, instruction_count);
-              wc_lru_cache.Insert(evict_is_wccache_hit, evict_wccache_set, evict_wc_block_addr, instruction_count, true, evict_minor_ctr_pos);
-	      is_dccm_overhead=false;
-	      if(OTP_PRECALCULATION)
-	      {
-		      same_relevel_for_small_and_big=true;
-		      if((morph_tree.versions_level[evict_counter_id].miss_small_ctr(evict_minor_ctr_pos, false))&&(wc_lru_cache.highest_group_to_avoid_overflow(evict_counter_id, evict_wc_block_addr, evict_minor_ctr_pos, false, true)<TABLE_SIZE))
-		      {
-			      
-
-
-
-			      UINT32 table_index=wc_lru_cache.highest_group_to_avoid_overflow(evict_counter_id, evict_wc_block_addr, evict_minor_ctr_pos, false, true);
-			      wc_lru_cache.ChainCounterIncrement(evict_counter_id, evict_wc_block_addr, evict_minor_ctr_pos, instruction_count, false, true, table_index);
-		      }	
-		      else if(wc_lru_cache.will_overflow(evict_counter_id, evict_wc_block_addr, evict_minor_ctr_pos, instruction_count, true, false)>=wc_lru_cache.will_overflow(evict_counter_id, evict_wc_block_addr, evict_minor_ctr_pos, instruction_count, true, true))
-		      {
-			      wc_lru_cache.ChainCounterIncrement(evict_counter_id, evict_wc_block_addr, evict_minor_ctr_pos, instruction_count, false,true,1000);
-		      }
-		      //else if ((dccm_overflow_traffic<(DCCM_OVERHEAD_RATIO*OTP_INTERVAL+dccm_remain_budget))&&((rand_func()%100)<(POSSIBILITY_WITH_OVERFLOW_RELEVEL*100)))
-		      else if ((dccm_overflow_traffic<(DCCM_OVERHEAD_RATIO*OTP_INTERVAL+dccm_remain_budget))&&(possibilistic_page_level_dccm_relevel()))
-		      {
-				
-			      potential_overflow_events++;
-			      if(debug_budget)
-				      printf("remaining budget: %lf,  before page level relevel,  instruction number: %lu, data block address: %lu\n", DCCM_OVERHEAD_RATIO*OTP_INTERVAL+dccm_remain_budget-dccm_overflow_traffic,  instruction_count_total,  current_written_block_address);
-			      is_dccm_overhead=true;
-			      before_dccm_overflow_events=total_overflow_events;
-			      wc_lru_cache.ChainCounterIncrement(evict_counter_id, evict_wc_block_addr, evict_minor_ctr_pos, instruction_count, false,true,1000);
-			      after_dccm_overflow_events=total_overflow_events;
-			      if(after_dccm_overflow_events>before_dccm_overflow_events)
-				total_dccm_overflow_events++;
-		    }  
-		      else
-			      wc_lru_cache.ChainCounterIncrement(evict_counter_id, evict_wc_block_addr, evict_minor_ctr_pos, instruction_count, false,false,1000);
-	      }
-	      else
-	      {
-		      wc_lru_cache.ChainCounterIncrement(evict_counter_id, evict_wc_block_addr, evict_minor_ctr_pos, instruction_count, false,false,1000);
-	      }
-	      }
-            //xinw added for otp precomputation-end
-          }
-        }
-      }
+	    if (L2_evict_dirty_status == WRITE_OP) {
+		WriteBack(L2_evict_addr, instruction_count);
+	    }
+	    //xinw added for otp precomputation-end
+	    }
+	  }
+	}
       return CACHE_HIT;
     }
   } 
@@ -5381,6 +5425,7 @@ else
  // if((OTP_PRECALCULATION)&&(stack_status != 1)) 
   {
 	  dccm_block_level_relevel=0;
+	  current_block_addr_access_aes_table=block_addr;
 	  otp_table.access(effective_version, is_wccache_hit); 
 	  if (otp_table.need_activel_relevel(effective_version)) 
 	  {
@@ -5436,6 +5481,7 @@ else
   } 
   else
   {
+	  current_block_addr_access_aes_table=block_addr;
 	  otp_table.access(effective_version, is_wccache_hit); 
   }
   //update_workload_stats(block_addr); 	
@@ -5824,153 +5870,14 @@ else
         L2.InsertWithEviction(L2_evict_set, L1_evict_addr, L2_evict_index, L1_evict_dirty_status, 4);		
 
         EvictionUpdateStats(L2_evict_addr, L2_evict_index, L2_evict_dirty_status);
-	//xinw commented this part for otp precomputation-begin 
-        /*
-        if (L2_evict_dirty_status == WRITE_OP) {
-          //std::cout << "3s" << std::endl;
-          UINT32 evict_is_wccache_hit = 0;
-          UINT64 evict_physical_page_addr = morph_tree.GetPhysicalPageAddress(L2_evict_addr);
-          UINT64 evict_wc_block_addr = morph_tree.GetCounterAddress(0, evict_physical_page_addr);
-          UINT64 evict_wccache_set = evict_wc_block_addr & WCCACHE_SET_MASK;
-          evict_is_wccache_hit = wc_lru_cache.IsWcCacheHit(evict_wccache_set, evict_wc_block_addr, instruction_count); 
-          if (evict_is_wccache_hit < 2) {
-            wc_lru_cache.PreemptiveVerification(evict_wc_block_addr, instruction_count);
-          }
-          UINT64 evict_counter_id = morph_tree.GetLevelCounterId(0, evict_wc_block_addr);
-          UINT64 evict_minor_ctr_pos = (L2_evict_addr >> DATA_CACHE_BLOCK_BITS) & MINOR_CTR_POS_MASK;
-          wc_lru_cache.Insert(evict_is_wccache_hit, evict_wccache_set, evict_wc_block_addr, instruction_count);
-          wc_lru_cache.ChainCounterIncrement(evict_counter_id, evict_wc_block_addr, evict_minor_ctr_pos, instruction_count);
-          //std::cout << "3c" << std::endl;
-          //UINT64 evict_effective_version = wc_lru_cache.GetEffectiveCounter(evict_wccache_set, evict_wc_block_addr, minor_ctr_pos);
-          ////std::cout << "evicteffectivecounter " << evict_effective_version << std::endl;
-          //std::cout << "3e" << std::endl;
-        }
-        */
-	//xinw commented this part for otp precomputation-end 
-        //xinw added for otp precomputation-begin
-              UINT32 evict_is_wccache_hit = 0;
-              UINT64 evict_physical_page_addr = morph_tree.GetPhysicalPageAddress(L2_evict_addr);
-              UINT64 evict_wc_block_addr = morph_tree.GetCounterAddress(0, evict_physical_page_addr);
-              UINT64 evict_wccache_set = evict_wc_block_addr & WCCACHE_SET_MASK; 
-              //UINT64 evict_minor_ctr_pos = (L2_evict_addr >> DATA_CACHE_BLOCK_BITS) & MINOR_CTR_POS_MASK;
-              UINT64 evict_minor_ctr_pos = (evict_physical_page_addr%2)*64+((L2_evict_addr >> DATA_CACHE_BLOCK_BITS) & (MINOR_CTR_POS_MASK>>1));
-              UINT64 evict_counter_id = morph_tree.GetLevelCounterId(0, evict_wc_block_addr);
-              if (L2_evict_dirty_status == WRITE_OP) {
-		      read_and_write_number++;
-		      if(read_and_write_number>=OTP_INTERVAL)
-		      {
-				UINT64 old_dccm_remain_budget = dccm_remain_budget;
-			     // if(dccm_overflow_traffic<(DCCM_OVERHEAD_RATIO*OTP_INTERVAL+dccm_remain_budget))
-				      dccm_remain_budget=DCCM_OVERHEAD_RATIO*OTP_INTERVAL+dccm_remain_budget-dccm_overflow_traffic;
-			     // else 
-				//      dccm_remain_budget=0;
-			      if(debug_budget)
-				      printf("in the end of epoch, the remaining budget is %ld, dccm_overflow_traffic in this epoch: %ld\n", dccm_remain_budget, dccm_overflow_traffic);
-			   
-			      if(custom_debug)
-		  		      printf("in the end of epoch, the remaining budget is %lu, dccm_overflow_traffic in this epoch: %lu, budget in the beginning of epoch: %lu\n", dccm_remain_budget, dccm_overflow_traffic, old_dccm_remain_budget);
-			      accumulated_dccm_traffic_overhead+=dccm_overflow_traffic;     
-			      read_and_write_number=0;
-			      dccm_overflow_traffic=0;
-		      }
-
-		       evict_is_wccache_hit = wc_lru_cache.IsWcCacheHit(evict_wccache_set, evict_wc_block_addr, instruction_count); 
-    	      	       wc_cache_tree_access_stats[0]++;
-    	      	       wc_cache_tree_access_write_stats[0]++;
- //xinw added for metadata cache debugging
-    if(debug_metadata_cache){
-  	printf("tree node level: 0 , wc block address: %lu , hit/miss(0 means miss): %u, due to normal data write\n ",   evict_wc_block_addr, evict_is_wccache_hit);
-  }
-
-
-	//xinw commentted for debugging with same stats as gem5
-	/*	      if (evict_is_wccache_hit < 2) {
-			      wc_lru_cache.PreemptiveVerification(evict_wc_block_addr, instruction_count);
-              }
-	*/
-              //wc_lru_cache.Insert(evict_is_wccache_hit, evict_wccache_set, evict_wc_block_addr, instruction_count);
-              wc_lru_cache.Insert(evict_is_wccache_hit, evict_wccache_set, evict_wc_block_addr, instruction_count, true, evict_minor_ctr_pos);
-	      
-              //wc_lru_cache.ChainCounterIncrement(evict_counter_id, evict_wc_block_addr, evict_minor_ctr_pos, instruction_count, false);
-	       is_dccm_overhead=false;
-	     
-	     /* if(OTP_PRECALCULATION)
-	      {
-	      if(wc_lru_cache.will_overflow(evict_counter_id, evict_wc_block_addr, evict_minor_ctr_pos, instruction_count, true, false)>=wc_lru_cache.will_overflow(evict_counter_id, evict_wc_block_addr, evict_minor_ctr_pos, instruction_count, true, true))
-              	{
-		printf("dccm no overflow overhead\n");
-		wc_lru_cache.ChainCounterIncrement(evict_counter_id, evict_wc_block_addr, evict_minor_ctr_pos, instruction_count, false,true);
-	     	 }	
-		 else if (dccm_overflow_traffic<DCCM_OVERHEAD_RATIO*OTP_INTERVAL)
-	      {
-		printf("dccm overhead not enough\n");
-	      is_dccm_overhead=true;
-              wc_lru_cache.ChainCounterIncrement(evict_counter_id, evict_wc_block_addr, evict_minor_ctr_pos, instruction_count, false,true);
-	      }
- 	      else if (wc_lru_cache.highest_group_to_avoid_overflow(evict_counter_id, evict_wc_block_addr, evict_minor_ctr_pos, false, true)<TABLE_SIZE)
-	      {
-		//is_dccm_overhead=true;
-		printf("dccm not overflow for small counter\n");
-		UINT32 table_index=wc_lru_cache.highest_group_to_avoid_overflow(evict_counter_id, evict_wc_block_addr, evict_minor_ctr_pos, false, true);
-		//is_dccm_overhead=true;
-		wc_lru_cache.ChainCounterIncrementForSmall(evict_counter_id, evict_wc_block_addr, evict_minor_ctr_pos, instruction_count, false, true, table_index);
-	      }	
-	      else
-		{
-		printf("do baseline incrementing\n");
-              	wc_lru_cache.ChainCounterIncrement(evict_counter_id, evict_wc_block_addr, evict_minor_ctr_pos, instruction_count, false,false);
-	    	}
-	      }
-	      else
-	      {
-              wc_lru_cache.ChainCounterIncrement(evict_counter_id, evict_wc_block_addr, evict_minor_ctr_pos, instruction_count, false,false);
-            }
-	    */
-	      if(OTP_PRECALCULATION)
-	      {
-		      same_relevel_for_small_and_big=true;
-		      if((morph_tree.versions_level[evict_counter_id].miss_small_ctr(evict_minor_ctr_pos, false))&&(wc_lru_cache.highest_group_to_avoid_overflow(evict_counter_id, evict_wc_block_addr, evict_minor_ctr_pos, false, true)<TABLE_SIZE))
-		      {
-
-			      UINT32 table_index=wc_lru_cache.highest_group_to_avoid_overflow(evict_counter_id, evict_wc_block_addr, evict_minor_ctr_pos, false, true);
-			      wc_lru_cache.ChainCounterIncrement(evict_counter_id, evict_wc_block_addr, evict_minor_ctr_pos, instruction_count, false, true, table_index);
-		      }	
-		      else if(wc_lru_cache.will_overflow(evict_counter_id, evict_wc_block_addr, evict_minor_ctr_pos, instruction_count, true, false)>=wc_lru_cache.will_overflow(evict_counter_id, evict_wc_block_addr, evict_minor_ctr_pos, instruction_count, true, true))
-		      {
-			      wc_lru_cache.ChainCounterIncrement(evict_counter_id, evict_wc_block_addr, evict_minor_ctr_pos, instruction_count, false,true,1000);
-		      }
-		      //else if ((dccm_overflow_traffic<(DCCM_OVERHEAD_RATIO*OTP_INTERVAL+dccm_remain_budget))&&((rand_func()%100)<(POSSIBILITY_WITH_OVERFLOW_RELEVEL*100)))
-		      else if ((dccm_overflow_traffic<(DCCM_OVERHEAD_RATIO*OTP_INTERVAL+dccm_remain_budget))&&(possibilistic_page_level_dccm_relevel()))
-		      {
-			      potential_overflow_events++;
-			      if(debug_budget)
-				      printf("remaining budget: %lf,  before page level relevel,  instruction number: %lu, data block address: %lu\n", DCCM_OVERHEAD_RATIO*OTP_INTERVAL+dccm_remain_budget-dccm_overflow_traffic,  instruction_count_total,  current_written_block_address);
-
-			      //printf("will dccm overflow\n");
-			      is_dccm_overhead=true;
-			      before_dccm_overflow_events=total_overflow_events;
-			      wc_lru_cache.ChainCounterIncrement(evict_counter_id, evict_wc_block_addr, evict_minor_ctr_pos, instruction_count, false,true,1000);
-			      after_dccm_overflow_events=total_overflow_events;
-			      if(after_dccm_overflow_events>before_dccm_overflow_events)
-				total_dccm_overflow_events++;
-		
-
-		      } 
-		      else
-			      wc_lru_cache.ChainCounterIncrement(evict_counter_id, evict_wc_block_addr, evict_minor_ctr_pos, instruction_count, false,false,1000);
-	      }
-
-	      else
-	      {
-		      wc_lru_cache.ChainCounterIncrement(evict_counter_id, evict_wc_block_addr, evict_minor_ctr_pos, instruction_count, false,false,1000);
-	      }
-
-              }
-            //xinw added for otp precomputation-end
-
+	//xinw added for otp precomputation-begin
+	if (L2_evict_dirty_status == WRITE_OP) {
+		WriteBack(L2_evict_addr, instruction_count);
+	}
+	//xinw added for otp precomputation-end
+	}
       }
     }
-  }
 
   return evict_type;
 }
@@ -6374,6 +6281,8 @@ int main(int argc, char *argv[])
 	morph_tree.InitTree(false);
   POSSIBILITY_WITH_OVERFLOW_RELEVEL=KnobPossibilityOverflowRelevel;
   is_gap=(int)KnobIsGap.Value();
+  use_page_zero=(int)KnobUsePageZero.Value();
+  delay_high_level_tree_node_overflow=(int)KnobDelayHighLevelTreeNodeOverflow.Value();
   DCCM_OVERHEAD_RATIO=KnobDccmOverhead.Value()*1.0/100;
   DCCM_OVERHEAD_RATIO_AFTER_WARMUP=DCCM_OVERHEAD_RATIO;
   CACHELINE_OFFSET=KnobCachelineOffset.Value();
@@ -6389,6 +6298,17 @@ int main(int argc, char *argv[])
 }
 void MorphCtrBlock::FetchForOverflow()
 {	
+    if((ctr_level_>0)&&delay_high_level_tree_node_overflow)
+    {
+	    UINT64 _wc_block_addr = morph_addr+VERSIONS_START_ADDR; 
+            UINT64 curr_wccache_set = _wc_block_addr & WCCACHE_SET_MASK;
+	    UINT curr_wccache_hit =wc_lru_cache.CheckWcCacheHit(curr_wccache_set, _wc_block_addr, instruction_count_total); 
+	    if(curr_wccache_hit)
+	    {
+		wc_lru_cache.UpdateOverflowOverhead(curr_wccache_set, _wc_block_addr, 256);
+		return;
+	    }
+    }
     total_overflow_events++;
 	//printf("overflow\n");
 	if(relevel_reason==RELEVEL_FOR_SMALLER_VALUE_THAN_MIN)
@@ -6473,6 +6393,18 @@ void MorphCtrBlock::FetchForOverflow()
 }
 void MorphCtrBlock::FetchForMcrOverflow(bool is_base_2)
 {
+    if((ctr_level_>0)&&delay_high_level_tree_node_overflow)
+    {
+	    UINT64 _wc_block_addr = morph_addr+VERSIONS_START_ADDR; 
+            UINT64 curr_wccache_set = _wc_block_addr & WCCACHE_SET_MASK;
+	    UINT curr_wccache_hit =wc_lru_cache.CheckWcCacheHit(curr_wccache_set, _wc_block_addr, instruction_count_total); 
+	    if(curr_wccache_hit)
+	    {
+		wc_lru_cache.UpdateOverflowOverhead(curr_wccache_set, _wc_block_addr, 128);
+		return;
+	    }
+    }
+
 	if(debug_overflow)
 		printf("remaining budget: %lf,   tree level: %u, tree node id: %lu, instruction number: %lu, data block address: %lu\n", DCCM_OVERHEAD_RATIO*OTP_INTERVAL+dccm_remain_budget-dccm_overflow_traffic, ctr_level_, morph_addr, instruction_count_total,  current_written_block_address);
 
@@ -6574,3 +6506,4 @@ void MorphCtrBlock::FetchForMcrOverflow(bool is_base_2)
 
 
 	
+
